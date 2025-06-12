@@ -1,6 +1,7 @@
-from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, EmailStr
 from typing import Optional, List
 from jose import JWTError, jwt
@@ -14,6 +15,11 @@ import cloudinary.uploader
 import requests
 from enum import Enum
 from dotenv import load_dotenv
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 load_dotenv()
 
 # Initialize FastAPI
@@ -249,7 +255,7 @@ async def upload_profile_image(file: UploadFile = File(...), current_user=Depend
 @app.post("/listings")
 async def create_listing(listing_data: ListingCreate, current_user=Depends(get_current_user)):
     listing_doc = {
-        **listing_data.dict,
+        **listing_data.dict(),
         "seller_id": current_user["_id"],
         "seller_name": current_user["full_name"],
         "seller_phone": current_user["phone"],
@@ -260,6 +266,7 @@ async def create_listing(listing_data: ListingCreate, current_user=Depends(get_c
 
     result = listings_collection.insert_one(listing_doc)
     return {"message": "Listing created successfully", "listing_id": str(result.inserted_id)}
+
 
 @app.post("/listings/{listing_id}/upload-images")
 async def upload_listing_images(listing_id: str, files: List[UploadFile] = File(...),
@@ -384,9 +391,9 @@ async def initiate_payment(payment_data: PaymentInitiate, current_user=Depends(g
 
     headers = {"Authorization": f"Bearer {PAYSTACK_SECRET_KEY}", "Content-Type": "application/json"}
     payload = {
-        "amount": int(payment_data.amount * 100),  # Convert to kobo
+        "amount": int(payment_data.amount * 100),
         "email": payment_data.email,
-        "callback_url": "https://your-frontend-domain.com/payment-callback"  # Replace with actual frontend URL
+        "callback_url": "https://trash4app-be.onrender.com/payment-callback"
     }
 
     try:
@@ -446,6 +453,204 @@ async def topup_wallet(topup_data: WalletTopup, current_user=Depends(get_current
     })
 
     return {"message": "Wallet topped up successfully", "new_balance": new_balance}
+
+
+
+@app.get("/payment-callback", response_class=HTMLResponse)
+async def payment_callback(reference: Optional[str] = Query(None)):
+    if not reference or reference.strip() == "":
+        html_content = """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Payment Error - Trash4Cash</title>
+            <script src="https://cdn.tailwindcss.com"></script>
+        </head>
+        <body class="bg-gray-100 flex items-center justify-center min-h-screen">
+            <div class="bg-white p-8 rounded-lg shadow-lg max-w-md w-full text-center">
+                <h1 class="text-2xl font-bold text-red-600 mb-4">Payment Error</h1>
+                <p class="text-gray-700 mb-6">Invalid or missing transaction reference. Please try again.</p>
+                <a href="trash4cash://payment-result?status=failed"
+                   class="bg-blue-600 text-white font-semibold py-2 px-4 rounded hover:bg-blue-700 transition">
+                    Return to App
+                </a>
+            </div>
+        </body>
+        </html>
+        """
+        return HTMLResponse(content=html_content)
+
+    headers = {"Authorization": f"Bearer {PAYSTACK_SECRET_KEY}"}
+    try:
+        response = requests.get(f"https://api.paystack.co/transaction/verify/{reference}", headers=headers)
+
+        logger.info(f"Paystack callback verify response: {response.status_code} - {response.text}")
+
+        if response.status_code == 404:
+            html_content = """
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Payment Failed - Trash4Cash</title>
+                <script src="https://cdn.tailwindcss.com"></script>
+            </head>
+            <body class="bg-gray-100 flex items-center justify-center min-h-screen">
+                <div class="bg-white p-8 rounded-lg shadow-lg max-w-md w-full text-center">
+                    <h1 class="text-2xl font-bold text-red-600 mb-4">Payment Failed</h1>
+                    <p class="text-gray-700 mb-6">Invalid transaction reference. Please try again.</p>
+                    <a href="trash4cash://payment-result?status=failed"
+                       class="bg-blue-600 text-white font-semibold py-2 px-4 rounded hover:bg-blue-700 transition">
+                        Return to App
+                    </a>
+                </div>
+            </body>
+            </html>
+            """
+            return HTMLResponse(content=html_content)
+        if response.status_code != 200:
+            html_content = """
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Payment Error - Trash4Cash</title>
+                <script src="https://cdn.tailwindcss.com"></script>
+            </head>
+            <body class="bg-gray-100 flex items-center justify-center min-h-screen">
+                <div class="bg-white p-8 rounded-lg shadow-lg max-w-md w-full text-center">
+                    <h1 class="text-2xl font-bold text-red-600 mb-4">Payment Error</h1>
+                    <p class="text-gray-700 mb-6">Failed to verify payment. Please try again or contact support.</p>
+                    <a href="trash4cash://payment-result?status=failed"
+                       class="bg-blue-600 text-white font-semibold py-2 px-4 rounded hover:bg-blue-700 transition">
+                        Return to App
+                    </a>
+                </div>
+            </body>
+            </html>
+            """
+            return HTMLResponse(content=html_content)
+
+        payment_data = response.json()
+        if payment_data["data"]["status"] != "success":
+            html_content = """
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Payment Failed - Trash4Cash</title>
+                <script src="https://cdn.tailwindcss.com"></script>
+            </head>
+            <body class="bg-gray-100 flex items-center justify-center min-h-screen">
+                <div class="bg-white p-8 rounded-lg shadow-lg max-w-md w-full text-center">
+                    <h1 class="text-2xl font-bold text-red-600 mb-4">Payment Failed</h1>
+                    <p class="text-gray-700 mb-6">Payment was not successful. Please try again.</p>
+                    <a href="trash4cash://payment-result?status=failed"
+                       class="bg-blue-600 text-white font-semibold py-2 px-4 rounded hover:bg-blue-700 transition">
+                        Return to App
+                    </a>
+                </div>
+            </body>
+            </html>
+            """
+            return HTMLResponse(content=html_content)
+
+        # Payment successful, find user by email to update wallet
+        email = payment_data["data"]["customer"]["email"]
+        user = users_collection.find_one({"email": email})
+        if not user:
+            html_content = """
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Payment Error - Trash4Cash</title>
+                <script src="https://cdn.tailwindcss.com"></script>
+            </head>
+            <body class="bg-gray-100 flex items-center justify-center min-h-screen">
+                <div class="bg-white p-8 rounded-lg shadow-lg max-w-md w-full text-center">
+                    <h1 class="text-2xl font-bold text-red-600 mb-4">Payment Error</h1>
+                    <p class="text-gray-700 mb-6">User not found. Please contact support.</p>
+                    <a href="trash4cash://payment-result?status=failed"
+                       class="bg-blue-600 text-white font-semibold py-2 px-4 rounded hover:bg-blue-700 transition">
+                        Return to App
+                    </a>
+                </div>
+            </body>
+            </html>
+            """
+            return HTMLResponse(content=html_content)
+
+        amount = payment_data["data"]["amount"] / 100  # Convert from kobo
+        new_balance = user["wallet_balance"] + amount
+
+        users_collection.update_one(
+            {"_id": ObjectId(user["_id"])},
+            {"$set": {"wallet_balance": new_balance}}
+        )
+
+        transactions_collection.insert_one({
+            "user_id": user["_id"],
+            "type": TransactionType.WALLET_TOPUP,
+            "amount": amount,
+            "description": "Wallet top-up via Paystack callback",
+            "reference": reference,
+            "created_at": datetime.utcnow()
+        })
+
+        html_content = """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Payment Successful - Trash4Cash</title>
+            <script src="https://cdn.tailwindcss.com"></script>
+        </head>
+        <body class="bg-gray-100 flex items-center justify-center min-h-screen">
+            <div class="bg-white p-8 rounded-lg shadow-lg max-w-md w-full text-center">
+                <h1 class="text-2xl font-bold text-green-600 mb-4">Payment Successful</h1>
+                <p class="text-gray-700 mb-6">Your wallet has been topped up with ₦{:.2f}. Thank you!</p>
+                <a href="trash4cash://payment-result?status=success&amount={:.2f}&reference={}"
+                   class="bg-blue-600 text-white font-semibold py-2 px-4 rounded hover:bg-blue-700 transition">
+                    Return to App
+                </a>
+            </div>
+        </body>
+        </html>
+        """.format(amount, amount, reference)
+
+        return HTMLResponse(content=html_content)
+    except Exception as e:
+        logger.error(f"Payment callback error: {str(e)}")
+        html_content = """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Payment Error - Trash4Cash</title>
+            <script src="https://cdn.tailwindcss.com"></script>
+        </head>
+        <body class="bg-gray-100 flex items-center justify-center min-h-screen">
+            <div class="bg-white p-8 rounded-lg shadow-lg max-w-md w-full text-center">
+                <h1 class="text-2xl font-bold text-red-600 mb-4">Payment Error</h1>
+                <p class="text-gray-700 mb-6">An error occurred while processing your payment. Please try again or contact support.</p>
+                <a href="trash4cash://payment-result?status=failed"
+                   class="bg-blue-600 text-white font-semibold py-2 px-4 rounded hover:bg-blue-700 transition">
+                    Return to App
+                </a>
+            </div>
+        </body>
+        </html>
+        """
+        return HTMLResponse(content=html_content)
 
 @app.post("/wallet/withdraw")
 async def request_withdrawal(withdrawal_data: WithdrawalRequest, current_user=Depends(get_current_user)):
