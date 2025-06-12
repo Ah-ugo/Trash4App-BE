@@ -62,16 +62,20 @@ listings_collection = db.listings
 transactions_collection = db.transactions
 withdrawals_collection = db.withdrawals
 
+
 # Enums
 class UserRole(str, Enum):
     BUYER = "buyer"
     SELLER = "seller"
     ADMIN = "admin"
 
+
 class ListingStatus(str, Enum):
     ACTIVE = "active"
     SOLD = "sold"
     BANNED = "banned"
+    DELETED = "deleted"
+
 
 class TransactionType(str, Enum):
     PURCHASE = "purchase"
@@ -79,10 +83,12 @@ class TransactionType(str, Enum):
     WALLET_TOPUP = "wallet_topup"
     WITHDRAWAL = "withdrawal"
 
+
 class WithdrawalStatus(str, Enum):
     PENDING = "pending"
     PAID = "paid"
     REJECTED = "rejected"
+
 
 # Pydantic models
 class UserCreate(BaseModel):
@@ -92,9 +98,11 @@ class UserCreate(BaseModel):
     phone: str
     role: UserRole = UserRole.BUYER
 
+
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
+
 
 class UserProfile(BaseModel):
     full_name: str
@@ -102,24 +110,28 @@ class UserProfile(BaseModel):
     whatsapp: Optional[str] = None
     city: Optional[str] = None
 
+
 class ListingCreate(BaseModel):
-    title: str
-    description: str
-    category: str
-    weight: float
-    price: float
-    location: str
+    title: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    weight: Optional[float] = None
+    price: Optional[float] = None
+    location: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
-    whatsapp: str
+    whatsapp: Optional[str] = None
+
 
 class PaymentInitiate(BaseModel):
     amount: float
     email: EmailStr
 
+
 class WalletTopup(BaseModel):
     amount: float
     reference: str
+
 
 class WithdrawalRequest(BaseModel):
     amount: float
@@ -127,12 +139,15 @@ class WithdrawalRequest(BaseModel):
     account_number: str
     account_name: str
 
+
 # Helper functions
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
+
 def verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+
 
 def create_jwt_token(user_id: str) -> str:
     payload = {
@@ -140,6 +155,7 @@ def create_jwt_token(user_id: str) -> str:
         "exp": datetime.utcnow() + timedelta(days=30)
     }
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
 
 def verify_jwt_token(token: str) -> str:
     try:
@@ -150,12 +166,14 @@ def verify_jwt_token(token: str) -> str:
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
+
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     user_id = verify_jwt_token(credentials.credentials)
     user = users_collection.find_one({"_id": ObjectId(user_id)})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user
+
 
 def serialize_doc(doc):
     if doc is None:
@@ -167,6 +185,7 @@ def serialize_doc(doc):
     if isinstance(doc, ObjectId):
         return str(doc)
     return doc
+
 
 # Auth endpoints
 @app.post("/auth/register")
@@ -197,6 +216,7 @@ async def register(user_data: UserCreate):
         "user": serialize_doc(users_collection.find_one({"_id": result.inserted_id}))
     }
 
+
 @app.post("/auth/login")
 async def login(login_data: UserLogin):
     user = users_collection.find_one({"email": login_data.email})
@@ -213,10 +233,12 @@ async def login(login_data: UserLogin):
         "user": serialize_doc(user)
     }
 
+
 # Profile endpoints
 @app.get("/profile")
 async def get_profile(current_user=Depends(get_current_user)):
     return serialize_doc(current_user)
+
 
 @app.put("/profile")
 async def update_profile(profile_data: UserProfile, current_user=Depends(get_current_user)):
@@ -230,6 +252,7 @@ async def update_profile(profile_data: UserProfile, current_user=Depends(get_cur
 
     updated_user = users_collection.find_one({"_id": ObjectId(current_user["_id"])})
     return {"message": "Profile updated successfully", "user": serialize_doc(updated_user)}
+
 
 @app.post("/profile/upload-image")
 async def upload_profile_image(file: UploadFile = File(...), current_user=Depends(get_current_user)):
@@ -251,11 +274,12 @@ async def upload_profile_image(file: UploadFile = File(...), current_user=Depend
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
+
 # Listing endpoints
 @app.post("/listings")
 async def create_listing(listing_data: ListingCreate, current_user=Depends(get_current_user)):
     listing_doc = {
-        **listing_data.dict(),
+        **listing_data.dict(exclude_unset=True),
         "seller_id": current_user["_id"],
         "seller_name": current_user["full_name"],
         "seller_phone": current_user["phone"],
@@ -268,9 +292,50 @@ async def create_listing(listing_data: ListingCreate, current_user=Depends(get_c
     return {"message": "Listing created successfully", "listing_id": str(result.inserted_id)}
 
 
+@app.put("/listings/{listing_id}")
+async def edit_listing(listing_id: str, listing_data: ListingCreate, current_user=Depends(get_current_user)):
+    listing = listings_collection.find_one({"_id": ObjectId(listing_id), "seller_id": current_user["_id"]})
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found or you are not the owner")
+
+    if listing["status"] != ListingStatus.ACTIVE:
+        raise HTTPException(status_code=400, detail="Only active listings can be edited")
+
+    update_data = listing_data.dict(exclude_unset=True)
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No fields provided to update")
+
+    update_data["updated_at"] = datetime.utcnow()
+
+    listings_collection.update_one(
+        {"_id": ObjectId(listing_id)},
+        {"$set": update_data}
+    )
+
+    updated_listing = listings_collection.find_one({"_id": ObjectId(listing_id)})
+    return {"message": "Listing updated successfully", "listing": serialize_doc(updated_listing)}
+
+
+@app.delete("/listings/{listing_id}")
+async def delete_listing(listing_id: str, current_user=Depends(get_current_user)):
+    listing = listings_collection.find_one({"_id": ObjectId(listing_id), "seller_id": current_user["_id"]})
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found or you are not the owner")
+
+    if listing["status"] != ListingStatus.ACTIVE:
+        raise HTTPException(status_code=400, detail="Only active listings can be deleted")
+
+    listings_collection.update_one(
+        {"_id": ObjectId(listing_id)},
+        {"$set": {"status": ListingStatus.DELETED, "deleted_at": datetime.utcnow()}}
+    )
+
+    return {"message": "Listing deleted successfully"}
+
+
 @app.post("/listings/{listing_id}/upload-images")
 async def upload_listing_images(listing_id: str, files: List[UploadFile] = File(...),
-                               current_user=Depends(get_current_user)):
+                                current_user=Depends(get_current_user)):
     listing = listings_collection.find_one({"_id": ObjectId(listing_id), "seller_id": current_user["_id"]})
     if not listing:
         raise HTTPException(status_code=404, detail="Listing not found")
@@ -296,6 +361,7 @@ async def upload_listing_images(listing_id: str, files: List[UploadFile] = File(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
+
 @app.get("/listings")
 async def get_listings(category: Optional[str] = None, location: Optional[str] = None, skip: int = 0, limit: int = 20):
     query = {"status": ListingStatus.ACTIVE}
@@ -307,6 +373,7 @@ async def get_listings(category: Optional[str] = None, location: Optional[str] =
     listings = list(listings_collection.find(query).skip(skip).limit(limit).sort("created_at", -1))
     return [serialize_doc(listing) for listing in listings]
 
+
 @app.get("/listings/{listing_id}")
 async def get_listing(listing_id: str):
     listing = listings_collection.find_one({"_id": ObjectId(listing_id)})
@@ -314,10 +381,12 @@ async def get_listing(listing_id: str):
         raise HTTPException(status_code=404, detail="Listing not found")
     return serialize_doc(listing)
 
+
 @app.get("/my-listings")
 async def get_my_listings(current_user=Depends(get_current_user)):
     listings = list(listings_collection.find({"seller_id": current_user["_id"]}).sort("created_at", -1))
     return [serialize_doc(listing) for listing in listings]
+
 
 # Purchase endpoint
 @app.post("/listings/{listing_id}/purchase")
@@ -333,7 +402,7 @@ async def purchase_listing(listing_id: str, current_user=Depends(get_current_use
         raise HTTPException(status_code=400, detail="Insufficient wallet balance")
 
     buyer_new_balance = current_user["wallet_balance"] - listing["price"]
-    seller = users_collection.find_one({"_id": ObjectId(listing["seller Beats me, I don't know what this meansseller_id"])})
+    seller = users_collection.find_one({"_id": ObjectId(listing["seller_id"])})
     seller_new_balance = seller["wallet_balance"] + listing["price"]
 
     users_collection.update_one(
@@ -357,20 +426,21 @@ async def purchase_listing(listing_id: str, current_user=Depends(get_current_use
     }
 
     transactions_collection.insert_one({
-        **transaction_data,
         "user_id": current_user["_id"],
         "type": TransactionType.PURCHASE,
-        "description": f"Purchased: {listing['title']}"
+        "description": f"Purchased: {listing['title']}",
+        **transaction_data
     })
 
     transactions_collection.insert_one({
-        **transaction_data,
         "user_id": listing["seller_id"],
         "type": TransactionType.SALE,
-        "description": f"Sold: {listing['title']}"
+        "description": f"Sold: {listing['title']}",
+        **transaction_data
     })
 
     return {"message": "Purchase successful", "new_balance": buyer_new_balance}
+
 
 # Wallet endpoints
 @app.get("/wallet")
@@ -380,6 +450,7 @@ async def get_wallet(current_user=Depends(get_current_user)):
         "balance": current_user["wallet_balance"],
         "recent_transactions": [serialize_doc(t) for t in transactions]
     }
+
 
 @app.post("/wallet/initiate-payment")
 async def initiate_payment(payment_data: PaymentInitiate, current_user=Depends(get_current_user)):
@@ -403,8 +474,10 @@ async def initiate_payment(payment_data: PaymentInitiate, current_user=Depends(g
             headers=headers
         )
 
+        logger.info(f"Paystack initialize response: {response.status_code} - {response.text}")
+
         if response.status_code != 200:
-            raise HTTPException(status_code=400, detail="Failed to initiate payment")
+            raise HTTPException(status_code=400, detail=f"Failed to initiate payment: {response.text}")
 
         response_data = response.json()
         if not response_data["status"]:
@@ -417,43 +490,55 @@ async def initiate_payment(payment_data: PaymentInitiate, current_user=Depends(g
             "reference": response_data["data"]["reference"]
         }
     except Exception as e:
+        logger.error(f"Payment initiation error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Payment initiation failed: {str(e)}")
+
 
 @app.post("/wallet/topup")
 async def topup_wallet(topup_data: WalletTopup, current_user=Depends(get_current_user)):
+    if not topup_data.reference or topup_data.reference.strip() == "":
+        raise HTTPException(status_code=400, detail="Invalid or missing reference")
+
     headers = {"Authorization": f"Bearer {PAYSTACK_SECRET_KEY}"}
-    response = requests.get(f"https://api.paystack.co/transaction/verify/{topup_data.reference}", headers=headers)
+    try:
+        response = requests.get(f"https://api.paystack.co/transaction/verify/{topup_data.reference}", headers=headers)
 
-    if response.status_code != 200:
-        raise HTTPException(status_code=400, detail="Payment verification failed")
+        logger.info(f"Paystack verify response: {response.status_code} - {response.text}")
 
-    payment_data = response.json()
-    if payment_data["data"]["status"] != "success":
-        raise HTTPException(status_code=400, detail="Payment not successful")
+        if response.status_code == 404:
+            raise HTTPException(status_code=400, detail="Invalid transaction reference")
+        if response.status_code != 200:
+            raise HTTPException(status_code=400, detail=f"Payment verification failed: {response.text}")
 
-    amount = payment_data["data"]["amount"] / 100  # Paystack amount is in kobo
+        payment_data = response.json()
+        if payment_data["data"]["status"] != "success":
+            raise HTTPException(status_code=400, detail=f"Payment not successful: {payment_data['message']}")
 
-    # Verify the amount matches
-    if abs(amount - topup_data.amount) > 0.01:
-        raise HTTPException(status_code=400, detail="Amount mismatch")
+        amount = payment_data["data"]["amount"] / 100  # Paystack amount is in kobo
 
-    new_balance = current_user["wallet_balance"] + amount
-    users_collection.update_one(
-        {"_id": ObjectId(current_user["_id"])},
-        {"$set": {"wallet_balance": new_balance}}
-    )
+        # Verify the amount matches
+        if abs(amount - topup_data.amount) > 0.01:
+            raise HTTPException(status_code=400, detail="Amount mismatch")
 
-    transactions_collection.insert_one({
-        "user_id": current_user["_id"],
-        "type": TransactionType.WALLET_TOPUP,
-        "amount": amount,
-        "description": "Wallet top-up via Paystack",
-        "reference": topup_data.reference,
-        "created_at": datetime.utcnow()
-    })
+        new_balance = current_user["wallet_balance"] + amount
+        users_collection.update_one(
+            {"_id": ObjectId(current_user["_id"])},
+            {"$set": {"wallet_balance": new_balance}}
+        )
 
-    return {"message": "Wallet topped up successfully", "new_balance": new_balance}
+        transactions_collection.insert_one({
+            "user_id": current_user["_id"],
+            "type": TransactionType.WALLET_TOPUP,
+            "amount": amount,
+            "description": "Wallet top-up via Paystack",
+            "reference": topup_data.reference,
+            "created_at": datetime.utcnow()
+        })
 
+        return {"message": "Wallet topped up successfully", "new_balance": new_balance}
+    except Exception as e:
+        logger.error(f"Payment verification error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Payment verification failed: {str(e)}")
 
 
 @app.get("/payment-callback", response_class=HTMLResponse)
@@ -652,6 +737,7 @@ async def payment_callback(reference: Optional[str] = Query(None)):
         """
         return HTMLResponse(content=html_content)
 
+
 @app.post("/wallet/withdraw")
 async def request_withdrawal(withdrawal_data: WithdrawalRequest, current_user=Depends(get_current_user)):
     if current_user["wallet_balance"] < withdrawal_data.amount:
@@ -676,6 +762,7 @@ async def request_withdrawal(withdrawal_data: WithdrawalRequest, current_user=De
 
     return {"message": "Withdrawal request submitted", "request_id": str(result.inserted_id)}
 
+
 # Admin endpoints
 @app.get("/admin/users")
 async def get_all_users(current_user=Depends(get_current_user)):
@@ -685,6 +772,7 @@ async def get_all_users(current_user=Depends(get_current_user)):
     users = list(users_collection.find({}).sort("created_at", -1))
     return [serialize_doc(user) for user in users]
 
+
 @app.get("/admin/listings")
 async def get_all_listings(current_user=Depends(get_current_user)):
     if current_user["role"] != UserRole.ADMIN:
@@ -693,6 +781,7 @@ async def get_all_listings(current_user=Depends(get_current_user)):
     listings = list(listings_collection.find({}).sort("created_at", -1))
     return [serialize_doc(listing) for listing in listings]
 
+
 @app.get("/admin/withdrawals")
 async def get_withdrawal_requests(current_user=Depends(get_current_user)):
     if current_user["role"] != UserRole.ADMIN:
@@ -700,6 +789,7 @@ async def get_withdrawal_requests(current_user=Depends(get_current_user)):
 
     withdrawals = list(withdrawals_collection.find({}).sort("created_at", -1))
     return [serialize_doc(withdrawal) for withdrawal in withdrawals]
+
 
 @app.put("/admin/withdrawals/{withdrawal_id}/approve")
 async def approve_withdrawal(withdrawal_id: str, current_user=Depends(get_current_user)):
@@ -714,6 +804,7 @@ async def approve_withdrawal(withdrawal_id: str, current_user=Depends(get_curren
 
     return {"message": "Withdrawal approved"}
 
+
 @app.put("/admin/listings/{listing_id}/ban")
 async def ban_listing(listing_id: str, current_user=Depends(get_current_user)):
     if current_user["role"] != UserRole.ADMIN:
@@ -726,6 +817,7 @@ async def ban_listing(listing_id: str, current_user=Depends(get_current_user)):
 
     return {"message": "Listing banned"}
 
+
 @app.put("/admin/users/{user_id}/ban")
 async def ban_user(user_id: str, current_user=Depends(get_current_user)):
     if current_user["role"] != UserRole.ADMIN:
@@ -737,6 +829,7 @@ async def ban_user(user_id: str, current_user=Depends(get_current_user)):
     )
 
     return {"message": "User banned"}
+
 
 # Location endpoints
 @app.get("/location/search")
@@ -756,6 +849,8 @@ async def search_location(query: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Location search failed: {str(e)}")
 
+
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
